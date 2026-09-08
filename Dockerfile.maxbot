@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1.4
+
+FROM osrf/ros:kinetic-desktop
+
+ARG USERNAME=ubuntu
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+
+RUN set -eux; \
+    groupadd --gid "${USER_GID}" "${USERNAME}"; \
+    useradd --uid "${USER_UID}" --gid "${USER_GID}" \
+        --create-home --shell /bin/bash "${USERNAME}"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+        sudo alsa-utils pulseaudio-utils libasound2-plugins \
+        software-properties-common vim net-tools iproute2 bash-completion \
+        usbutils mpg123 python-pip python-scipy; \
+    pip install --no-cache-dir --upgrade 'pip<21'; \
+    pip install --no-cache-dir pykalman==0.9.5; \
+    add-apt-repository --yes ppa:ubuntu-toolchain-r/test; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --only-upgrade \
+        libstdc++6; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+        ros-kinetic-navigation ros-kinetic-rosbridge-server \
+        ros-kinetic-rosapi ros-kinetic-teb-local-planner \
+        libopenni2-0 libopenni2-dev; \
+    printf '%s ALL=(root) NOPASSWD:ALL\n' "${USERNAME}" \
+        > "/etc/sudoers.d/${USERNAME}"; \
+    chmod 0440 "/etc/sudoers.d/${USERNAME}"; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV ROS_HOME=/home/ubuntu/.ros
+
+USER ubuntu
+RUN rosdep update --rosdistro=kinetic
+
+USER root
+RUN --mount=type=bind,from=workspaces,source=leg_ws,target=/home/ubuntu/leg_ws,readonly \
+    --mount=type=bind,from=workspaces,source=maxbot/ros_ws,target=/home/ubuntu/maxbot/ros_ws,readonly \
+    set -eux; \
+    apt-get update; \
+    rosdep install \
+        --from-paths /home/ubuntu/leg_ws/src /home/ubuntu/maxbot/ros_ws/src \
+        --ignore-src -r -y \
+        --skip-keys="apriltag libvtk-qt"; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'set -euo pipefail' \
+        '' \
+        'SINK_NAME="$(pactl list sinks short | awk "NR == 1 {print \$2; exit}")"' \
+        'if [[ -z "${SINK_NAME}" ]]; then' \
+        '    echo "No PulseAudio sink was found." >&2' \
+        '    exit 1' \
+        'fi' \
+        'pactl set-default-sink "${SINK_NAME}"' \
+        'pactl set-sink-volume "${SINK_NAME}" 70%' \
+    > /usr/local/bin/set_speaker.sh; \
+    chmod +x /usr/local/bin/set_speaker.sh
+
+USER ubuntu
+WORKDIR /home/ubuntu
+
+## The host PulseAudio server is reached through its mounted Unix socket.
+## Disable the optional POSIX shared-memory transport in container clients:
+## Docker/host IPC cleanup can otherwise produce harmless but noisy
+## "shm_unlink(/pulse-shm-...)" errors during playback shutdown.
+RUN mkdir -p /home/ubuntu/.config/pulse && \
+    printf '%s\n' 'enable-shm = no' > /home/ubuntu/.config/pulse/client.conf
+
+RUN printf '\nsource /opt/ros/kinetic/setup.bash\nsource /home/ubuntu/maxbot/ros_ws/devel/setup.bash\nexport ROS_MASTER_URI=http://192.168.10.86:13131\nexport ROS_IP=192.168.10.86\nexport ROS_HOSTNAME=192.168.10.86\n' \
+    >> /home/ubuntu/.bashrc

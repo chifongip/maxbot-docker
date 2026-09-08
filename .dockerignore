@@ -1,0 +1,7 @@
+# The ROS workspaces are supplied through the separate "workspaces" BuildKit
+# context in build_docker.sh.  Keep this primary context limited to the
+# Dockerfile so Git metadata and deployment documentation are not uploaded to
+# the Docker daemon during a build.
+*
+!.dockerignore
+!Dockerfile.maxbot
