@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1.4
+
+# Cartographer's ROS 1 support in this workspace targets Kinetic.
+FROM osrf/ros:kinetic-desktop
+
+ARG USERNAME=ubuntu
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+
+# rosdep sees these dependencies on newer Ubuntu releases as t64 packages.
+# Cartographer's vendored Abseil build supplies libabsl, and the remaining Qt
+# runtime libraries are not required for the Cartographer nodes themselves.
+ARG ROSDEP_SKIP_KEYS="libabsl-dev libqt5-widgets libqt5-gui libqt5-core libqt5widgets5t64 libqt5gui5t64 libqt5core5t64"
+
+RUN set -eux; \
+    groupadd --gid "${USER_GID}" "${USERNAME}"; \
+    useradd --uid "${USER_UID}" --gid "${USER_GID}" \
+        --create-home --shell /bin/bash "${USERNAME}"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+        alsa-utils pulseaudio-utils libasound2-plugins \
+        bash-completion ca-certificates cmake git iproute2 mpg123 net-tools \
+        ninja-build python-pip python-rosdep python-scipy python-wstool \
+        software-properties-common stow sudo usbutils vim; \
+    pip install --no-cache-dir --upgrade 'pip<21'; \
+    pip install --no-cache-dir pykalman==0.9.5; \
+    add-apt-repository --yes ppa:ubuntu-toolchain-r/test; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+        gcc-9 g++-9; \
+    ln -sfn gcc-9 /usr/bin/gcc; \
+    ln -sfn g++-9 /usr/bin/g++; \
+    printf '%s ALL=(root) NOPASSWD:ALL\n' "${USERNAME}" \
+        > "/etc/sudoers.d/${USERNAME}"; \
+    chmod 0440 "/etc/sudoers.d/${USERNAME}"; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CC=/usr/bin/gcc-9 \
+    CXX=/usr/bin/g++-9 \
+    ROS_HOME=/home/ubuntu/.ros
+
+# Initialise rosdep as the non-root development user.  The dependency install
+# below runs as root because it invokes apt.
+USER ${USERNAME}
+RUN rosdep update --rosdistro=kinetic
+
+# Copy only source repositories from the named BuildKit context. Existing
+# generated directories and prior protobuf/Abseil checkouts on the host are
+# deliberately not supplied, so Cartographer's install scripts start cleanly.
+USER root
+RUN --mount=type=bind,from=cartographer_sources,target=/mnt/cartographer-src,readonly \
+    set -eux; \
+    mkdir -p /home/ubuntu/cartographer_ws/src; \
+    cp -a /mnt/cartographer-src/. /home/ubuntu/cartographer_ws/src/; \
+    chown -R "${USERNAME}:${USERNAME}" /home/ubuntu/cartographer_ws
+
+USER ${USERNAME}
+RUN cd /home/ubuntu/cartographer_ws && \
+    src/cartographer/scripts/install_proto3.sh && \
+    src/cartographer/scripts/install_abseil.sh
+
+USER root
+RUN set -eux; \
+    apt-get update; \
+    rosdep install --from-paths /home/ubuntu/cartographer_ws/src \
+        --ignore-src -r -y --rosdistro=kinetic \
+        --skip-keys="${ROSDEP_SKIP_KEYS}"; \
+    rm -rf /var/lib/apt/lists/*
+
+USER ${USERNAME}
+RUN /bin/bash -lc 'source /opt/ros/kinetic/setup.bash && cd /home/ubuntu/cartographer_ws && catkin_make_isolated --install --use-ninja'
+
+RUN printf '%s\n' \
+        'source /opt/ros/kinetic/setup.bash' \
+        'if [[ -f /home/ubuntu/cartographer_ws/install_isolated/setup.bash ]]; then' \
+        '    source /home/ubuntu/cartographer_ws/install_isolated/setup.bash' \
+        'fi' \
+        'export ROS_MASTER_URI=http://192.168.10.86:13131' \
+        'export ROS_IP=192.168.10.86' \
+        'export ROS_HOSTNAME=192.168.10.86' \
+    >> /home/ubuntu/.bashrc
+
+WORKDIR /home/ubuntu
